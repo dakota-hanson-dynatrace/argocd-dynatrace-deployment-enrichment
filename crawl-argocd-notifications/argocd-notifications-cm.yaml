@@ -1,0 +1,71 @@
+# MERGE these keys into your EXISTING argocd-notifications-cm ConfigMap - do not
+# replace the whole file. If you already use ArgoCD Notifications for Slack/email/etc,
+# add the four `data` keys below alongside what you already have; they're new keys
+# with new names, so they won't collide with or disable your existing notifications.
+#
+# What this does: posts a Dynatrace CUSTOM_DEPLOYMENT event on every ArgoCD sync,
+# scoped to the app's namespace, so Davis can attach the deployment to problems on
+# that namespace's workloads.
+#
+# Known limitation (confirmed, not theoretical): the entitySelector below targets
+# CLOUD_APPLICATION via a cluster relationship. In a namespace with several
+# concurrently-deploying apps, this doesn't always land the event on the right
+# entity - some syncs miss it. See ../walk-cicd-events-api/ for the fix (direct
+# SERVICE targeting, confirmed reliable). Start here anyway - it's zero pipeline
+# changes and still gets you a real result most of the time.
+#
+# Placeholders to replace: <your-tenant>, <your-cluster-name>.
+#
+# One-time secret (never commit the token itself):
+#   kubectl patch secret argocd-notifications-secret -n argocd \
+#     -p '{"stringData":{"dynatrace-api-token":"<your Dynatrace API token, events.ingest scope only>"}}'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+  namespace: argocd
+data:
+  service.webhook.dynatrace: |
+    url: https://<your-tenant>.live.dynatrace.com/api/v2/events/ingest
+    headers:
+      - name: Authorization
+        value: "Api-Token $dynatrace-api-token"
+      - name: Content-Type
+        value: application/json
+
+  template.dynatrace-deploy-event: |
+    webhook:
+      dynatrace:
+        method: POST
+        body: |
+          {
+            "eventType": "CUSTOM_DEPLOYMENT",
+            "title": "ArgoCD deploy {{.app.metadata.name}} @ {{.app.status.sync.revision}}",
+            "entitySelector": "type(CLOUD_APPLICATION),namespaceName({{.app.spec.destination.namespace}}),toRelationships.isClusterOfCa(type(KUBERNETES_CLUSTER),entityName(\"<your-cluster-name>\"))",
+            "properties": {
+              "dt.event.deployment.name": "{{.app.metadata.name}}",
+              "dt.event.deployment.version": "{{.app.status.sync.revision}}",
+              "source": "ArgoCD",
+              "cluster": "<your-cluster-name>"
+            }
+          }
+
+  trigger.on-dynatrace-deploy-succeeded: |
+    - when: app.status.operationState.phase in ['Succeeded']
+      send: [dynatrace-deploy-event]
+
+  trigger.on-dynatrace-deploy-failed: |
+    - when: app.status.operationState.phase in ['Error', 'Failed']
+      send: [dynatrace-deploy-event]
+
+  # Global subscription: applies to every Application with zero per-app
+  # annotations needed. If you'd rather opt in per-app instead, drop this
+  # `subscriptions` key and annotate each Application instead:
+  #   notifications.argoproj.io/subscribe.on-dynatrace-deploy-succeeded.dynatrace: ""
+  #   notifications.argoproj.io/subscribe.on-dynatrace-deploy-failed.dynatrace: ""
+  subscriptions: |
+    - recipients:
+        - dynatrace
+      triggers:
+        - on-dynatrace-deploy-succeeded
+        - on-dynatrace-deploy-failed

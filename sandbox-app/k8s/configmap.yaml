@@ -1,0 +1,9 @@
+# This is the one value sandbox-deploy-and-enrich.yml flips to introduce/fix
+# the fault - a real, visible config change that triggers a real ArgoCD sync.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-app-config
+  namespace: <your-namespace>
+data:
+  FAULT_INJECTION: "false"

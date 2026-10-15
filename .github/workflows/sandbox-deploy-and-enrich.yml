@@ -1,0 +1,70 @@
+# Powers the OPTIONAL sandbox only - this is not the template to copy into your
+# real pipeline. The thing to actually copy is ../walk-cicd-events-api/emit-deployment-event.sh,
+# called from whatever step in your own pipeline already deploys your service.
+#
+# Run via Actions -> "Sandbox: deploy and enrich" -> Run workflow, action=introduce-fault,
+# then again with action=fix once you've seen the cause event land on a problem.
+name: Sandbox - deploy and enrich
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "introduce-fault or fix"
+        required: true
+        type: choice
+        options: [introduce-fault, fix]
+
+jobs:
+  deploy-and-enrich:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PUSH_TOKEN }}
+
+      - name: Set FAULT_INJECTION
+        run: |
+          set -euo pipefail
+          MANIFEST=sandbox-app/k8s/configmap.yaml
+          if [ "${{ inputs.action }}" = "introduce-fault" ]; then
+            NEW_VALUE="true"
+          else
+            NEW_VALUE="false"
+          fi
+          perl -i -pe "s#(FAULT_INJECTION: \")[a-z]+(\")#\${1}${NEW_VALUE}\${2}#" "$MANIFEST"
+          grep -q "FAULT_INJECTION: \"${NEW_VALUE}\"" "$MANIFEST" || { echo "::error::edit didn't take effect"; exit 1; }
+
+      - name: Commit and push (only if something changed)
+        id: commit
+        run: |
+          set -euo pipefail
+          git config user.name "sandbox-ci"
+          git config user.email "sandbox-ci@users.noreply.github.com"
+          git add sandbox-app/k8s/configmap.yaml
+          if git diff --cached --quiet; then
+            echo "already in that state, nothing to do"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git commit -m "sandbox: ${{ inputs.action }}"
+          git push origin HEAD:main
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      # ArgoCD picks this up via its default polling interval (a few minutes).
+      # If you want it instantly, call your ArgoCD instance's own sync API here
+      # with an ArgoCD-native account scoped to just `sync` on this one
+      # Application - see docs/reference.md for why a Kubernetes ServiceAccount
+      # token isn't the right tool for that (it can't be scoped to just the
+      # sync action).
+
+      - name: Notify Dynatrace of deployment
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          DT_TENANT: ${{ vars.DT_TENANT }}
+          DT_API_TOKEN: ${{ secrets.DT_API_TOKEN }}
+          APP: sandbox-app
+          NAMESPACE: ${{ vars.DT_NAMESPACE }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_MESSAGE: "sandbox: ${{ inputs.action }}"
+          GIT_URL: https://github.com/${{ github.repository }}/commit/${{ github.sha }}
+        run: ./walk-cicd-events-api/emit-deployment-event.sh

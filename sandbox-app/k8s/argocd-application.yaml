@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sandbox-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: <your-fork-of-this-repo>
+    targetRevision: main
+    path: sandbox-app/k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: <your-namespace>
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
